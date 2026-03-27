@@ -6,7 +6,6 @@
 import { useState, useMemo, useEffect, useCallback, useRef } from 'react';
 import {
   X,
-  Search,
   ArrowRight,
   ArrowUpRight,
   ArrowDownLeft,
@@ -18,7 +17,6 @@ import {
 import { Input } from '@/components/ui/input';
 import { Badge } from '@/components/ui/badge';
 import { ScrollArea } from '@/components/ui/scroll-area';
-import { Button } from '@/components/ui/button';
 import { Checkbox } from '@/components/ui/checkbox';
 import { Tabs, TabsList, TabsTrigger, TabsContent } from '@/components/ui/tabs';
 import {
@@ -100,7 +98,6 @@ export default function DataCloudDetailPanel({ entityName, onClose }: DataCloudD
     selectDataCloudEntities,
     detailPanelWidth,
     setDetailPanelWidth,
-    dcIsLoadingDescribe,
   } = useAppStore();
 
   const [fieldSearch, setFieldSearch] = useState('');
@@ -180,9 +177,6 @@ export default function DataCloudDetailPanel({ entityName, onClose }: DataCloudD
 
   // Get detailed describe if available
   const entityDescribe = dcDescribedEntities.get(entityName);
-
-  // Check if entity is in diagram
-  const isInDiagram = dcSelectedEntityNames.includes(entityName);
 
   // Entity type info
   const isDMO = entityInfo?.entity_type === 'DataModelObject';

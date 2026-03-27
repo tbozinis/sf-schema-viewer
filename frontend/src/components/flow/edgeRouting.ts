@@ -44,6 +44,8 @@ const LINE_JUMP_RADIUS = 10;
 const LINE_JUMP_HEIGHT = 9;
 const LINE_JUMP_ENDPOINT_PADDING = 18;
 const LINE_JUMP_MIN_GAP = LINE_JUMP_RADIUS * 2 + 4;
+const SIDE_ANCHOR_PADDING = 18;
+const MIN_SIDE_ANCHOR_SPACING = 12;
 
 function hasMeasuredSize(
   node: RoutingNode | undefined
@@ -97,14 +99,190 @@ function getSourceSide(
   return Position.Top;
 }
 
-function sortEdgesForSourceSide(a: RoutingEdge, b: RoutingEdge) {
-  if (a.target !== b.target) return a.target.localeCompare(b.target);
-  return getFieldName(a).localeCompare(getFieldName(b));
+function compareProjectedCoordinate(a: number, b: number) {
+  if (Math.abs(a - b) < 0.5) {
+    return 0;
+  }
+
+  return a - b;
 }
 
-function sortEdgesForTargetSide(a: RoutingEdge, b: RoutingEdge) {
-  if (a.source !== b.source) return a.source.localeCompare(b.source);
-  return getFieldName(a).localeCompare(getFieldName(b));
+function clampCoordinate(value: number, min: number, max: number) {
+  return Math.min(Math.max(value, min), max);
+}
+
+function getOrderingCoordinates(
+  node: RoutingNode & { measured: { width: number; height: number } },
+  side: Position
+) {
+  const center = getNodeCenter(node);
+
+  if (side === Position.Left || side === Position.Right) {
+    return { primary: center.y, secondary: center.x };
+  }
+
+  return { primary: center.x, secondary: center.y };
+}
+
+function getSideCoordinateBounds(
+  node: RoutingNode & { measured: { width: number; height: number } },
+  side: Position
+) {
+  if (side === Position.Left || side === Position.Right) {
+    return {
+      min: node.position.y + SIDE_ANCHOR_PADDING,
+      max: node.position.y + node.measured.height - SIDE_ANCHOR_PADDING,
+      usable: Math.max(node.measured.height - SIDE_ANCHOR_PADDING * 2, 0),
+    };
+  }
+
+  return {
+    min: node.position.x + SIDE_ANCHOR_PADDING,
+    max: node.position.x + node.measured.width - SIDE_ANCHOR_PADDING,
+    usable: Math.max(node.measured.width - SIDE_ANCHOR_PADDING * 2, 0),
+  };
+}
+
+function getDesiredSideCoordinate(
+  edge: RoutingEdge,
+  side: Position,
+  role: 'source' | 'target',
+  getNode: (id: string) => RoutingNode | undefined
+) {
+  const otherNodeId = role === 'source' ? edge.target : edge.source;
+  const otherNode = getNode(otherNodeId);
+
+  if (!hasMeasuredSize(otherNode)) {
+    return null;
+  }
+
+  const center = getNodeCenter(otherNode);
+  return side === Position.Left || side === Position.Right ? center.y : center.x;
+}
+
+export function compareEdgesBySidePosition(
+  a: RoutingEdge,
+  b: RoutingEdge,
+  side: Position,
+  role: 'source' | 'target',
+  getNode: (id: string) => RoutingNode | undefined
+) {
+  const aOtherId = role === 'source' ? a.target : a.source;
+  const bOtherId = role === 'source' ? b.target : b.source;
+  const aOtherNode = getNode(aOtherId);
+  const bOtherNode = getNode(bOtherId);
+
+  if (hasMeasuredSize(aOtherNode) && hasMeasuredSize(bOtherNode)) {
+    const aCoordinates = getOrderingCoordinates(aOtherNode, side);
+    const bCoordinates = getOrderingCoordinates(bOtherNode, side);
+    const primaryDiff = compareProjectedCoordinate(aCoordinates.primary, bCoordinates.primary);
+
+    if (primaryDiff !== 0) {
+      return primaryDiff;
+    }
+
+    const secondaryDiff = compareProjectedCoordinate(aCoordinates.secondary, bCoordinates.secondary);
+    if (secondaryDiff !== 0) {
+      return secondaryDiff;
+    }
+  }
+
+  if (aOtherId !== bOtherId) {
+    return aOtherId.localeCompare(bOtherId);
+  }
+
+  const fieldDiff = getFieldName(a).localeCompare(getFieldName(b));
+  if (fieldDiff !== 0) {
+    return fieldDiff;
+  }
+
+  return a.id.localeCompare(b.id);
+}
+
+export function getAdaptiveSideAnchor(
+  edge: RoutingEdge,
+  allEdges: RoutingEdge[],
+  node: RoutingNode & { measured: { width: number; height: number } },
+  side: Position,
+  role: 'source' | 'target',
+  getNode: (id: string) => RoutingNode | undefined
+): Point {
+  const anchor = getAnchorPoint(node, side);
+  const relatedEdges = allEdges
+    .filter((candidate) => {
+      if (role === 'source' && candidate.source !== edge.source) return false;
+      if (role === 'target' && candidate.target !== edge.target) return false;
+
+      const candidateSourceNode = getNode(candidate.source);
+      const candidateTargetNode = getNode(candidate.target);
+      if (!hasMeasuredSize(candidateSourceNode) || !hasMeasuredSize(candidateTargetNode)) {
+        return false;
+      }
+
+      const candidateSide = role === 'source'
+        ? getSourceSide(candidateSourceNode, candidateTargetNode)
+        : getTargetSide(candidateSourceNode, candidateTargetNode);
+
+      return candidateSide === side;
+    })
+    .sort((a, b) => compareEdgesBySidePosition(a, b, side, role, getNode));
+
+  if (relatedEdges.length <= 1) {
+    return anchor;
+  }
+
+  const { min, max, usable } = getSideCoordinateBounds(node, side);
+  const maxSpacing = relatedEdges.length > 1 ? usable / (relatedEdges.length - 1) : usable;
+  const minSpacing = Math.max(
+    MIN_SIDE_ANCHOR_SPACING,
+    Math.min(28, relatedEdges.length > 0 ? usable / relatedEdges.length : usable)
+  );
+  const spacing = Math.max(Math.min(minSpacing, maxSpacing || minSpacing), MIN_SIDE_ANCHOR_SPACING);
+
+  const entries = relatedEdges.map((candidate) => ({
+    edgeId: candidate.id,
+    desired: clampCoordinate(
+      getDesiredSideCoordinate(candidate, side, role, getNode) ??
+        (side === Position.Left || side === Position.Right
+          ? node.position.y + node.measured.height / 2
+          : node.position.x + node.measured.width / 2),
+      min,
+      max
+    ),
+  }));
+
+  if (entries.length === 0) {
+    return anchor;
+  }
+
+  const assigned = entries.map((entry) => entry.desired);
+
+  for (let index = 1; index < assigned.length; index += 1) {
+    assigned[index] = Math.max(assigned[index], assigned[index - 1] + spacing);
+  }
+
+  assigned[assigned.length - 1] = Math.min(assigned[assigned.length - 1], max);
+  for (let index = assigned.length - 2; index >= 0; index -= 1) {
+    assigned[index] = Math.min(assigned[index], assigned[index + 1] - spacing);
+  }
+
+  assigned[0] = Math.max(assigned[0], min);
+  for (let index = 1; index < assigned.length; index += 1) {
+    assigned[index] = Math.max(assigned[index], assigned[index - 1] + spacing);
+  }
+
+  const entryIndex = entries.findIndex((entry) => entry.edgeId === edge.id);
+  if (entryIndex < 0) {
+    return anchor;
+  }
+
+  const coordinate = clampCoordinate(assigned[entryIndex], min, max);
+
+  if (side === Position.Left || side === Position.Right) {
+    return { x: anchor.x, y: coordinate };
+  }
+
+  return { x: coordinate, y: anchor.y };
 }
 
 function sortEdgesForLaneGroup(a: RoutingEdge, b: RoutingEdge) {
@@ -399,38 +577,7 @@ function getDistributedAnchor(
   role: 'source' | 'target',
   getNode: (id: string) => RoutingNode | undefined
 ): Point {
-  const anchor = getAnchorPoint(node, side);
-  const relatedEdges = allEdges
-    .filter((candidate) => {
-      if (role === 'source' && candidate.source !== edge.source) return false;
-      if (role === 'target' && candidate.target !== edge.target) return false;
-
-      const candidateSourceNode = getNode(candidate.source);
-      const candidateTargetNode = getNode(candidate.target);
-      if (!hasMeasuredSize(candidateSourceNode) || !hasMeasuredSize(candidateTargetNode)) {
-        return false;
-      }
-
-      const candidateSide = role === 'source'
-        ? getSourceSide(candidateSourceNode, candidateTargetNode)
-        : getTargetSide(candidateSourceNode, candidateTargetNode);
-
-      return candidateSide === side;
-    })
-    .sort(role === 'source' ? sortEdgesForSourceSide : sortEdgesForTargetSide);
-
-  const index = relatedEdges.findIndex((candidate) => candidate.id === edge.id);
-  if (index < 0 || relatedEdges.length <= 1) {
-    return anchor;
-  }
-
-  if (side === Position.Left || side === Position.Right) {
-    const spacing = node.measured.height / (relatedEdges.length + 1);
-    return { x: anchor.x, y: node.position.y + spacing * (index + 1) };
-  }
-
-  const spacing = node.measured.width / (relatedEdges.length + 1);
-  return { x: node.position.x + spacing * (index + 1), y: anchor.y };
+  return getAdaptiveSideAnchor(edge, allEdges, node, side, role, getNode);
 }
 
 export function buildOrthogonalRouteMap(

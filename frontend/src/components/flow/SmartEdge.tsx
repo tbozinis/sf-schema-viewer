@@ -16,7 +16,7 @@ import { useAppStore } from '../../store';
 import {
   buildOrthogonalPathWithLineJumps,
   buildOrthogonalRouteMap,
-  getTargetSide,
+  getAdaptiveSideAnchor,
   type EdgeRoutingMode,
 } from './edgeRouting';
 
@@ -165,69 +165,28 @@ function SmartEdge({
       targetY = targetNode.position.y + targetHeight;
     }
 
-    const allEdges = getEdges();
-    const edgesFromSameSourceSide = allEdges.filter((edge) => {
-      if (edge.source !== source) return false;
-      const edgeSourceNode = getNode(edge.source);
-      const edgeTargetNode = getNode(edge.target);
-      if (!edgeSourceNode || !edgeTargetNode) return false;
+    const allEdges = getEdges() as Edge<Record<string, unknown>>[];
+    const sourceAnchor = getAdaptiveSideAnchor(
+      { id, source, target, data: (data as Record<string, unknown> | undefined) ?? {} } as Edge<Record<string, unknown>>,
+      allEdges,
+      sourceNode as Node<Record<string, unknown>> & { measured: { width: number; height: number } },
+      sourcePos,
+      'source',
+      (nodeId) => getNode(nodeId) as Node<Record<string, unknown>> | undefined
+    );
+    const targetAnchor = getAdaptiveSideAnchor(
+      { id, source, target, data: (data as Record<string, unknown> | undefined) ?? {} } as Edge<Record<string, unknown>>,
+      allEdges,
+      targetNode as Node<Record<string, unknown>> & { measured: { width: number; height: number } },
+      targetPos,
+      'target',
+      (nodeId) => getNode(nodeId) as Node<Record<string, unknown>> | undefined
+    );
 
-      const side = getTargetSide(edgeSourceNode, edgeTargetNode);
-      const edgeSourceSide = side === Position.Left
-        ? Position.Right
-        : side === Position.Right
-          ? Position.Left
-          : side === Position.Top
-            ? Position.Bottom
-            : Position.Top;
-
-      return edgeSourceSide === sourcePos;
-    });
-
-    edgesFromSameSourceSide.sort((a, b) => {
-      if (a.target !== b.target) return a.target.localeCompare(b.target);
-      const aField = (a.data as SmartEdgeData | undefined)?.fieldName ?? '';
-      const bField = (b.data as SmartEdgeData | undefined)?.fieldName ?? '';
-      return aField.localeCompare(bField);
-    });
-
-    const sourceSideIndex = edgesFromSameSourceSide.findIndex((edge) => edge.id === id);
-    const sourceSideTotal = edgesFromSameSourceSide.length;
-    if (sourceSideTotal > 1 && sourceSideIndex >= 0) {
-      if (sourcePos === Position.Left || sourcePos === Position.Right) {
-        const spacing = sourceHeight / (sourceSideTotal + 1);
-        sourceY = sourceNode.position.y + spacing * (sourceSideIndex + 1);
-      } else {
-        const spacing = sourceWidth / (sourceSideTotal + 1);
-        sourceX = sourceNode.position.x + spacing * (sourceSideIndex + 1);
-      }
-    }
-
-    const edgesToSameTargetSide = allEdges.filter((edge) => {
-      if (edge.target !== target) return false;
-      const edgeSourceNode = getNode(edge.source);
-      const edgeTargetNode = getNode(edge.target);
-      return getTargetSide(edgeSourceNode, edgeTargetNode) === targetPos;
-    });
-
-    edgesToSameTargetSide.sort((a, b) => {
-      if (a.source !== b.source) return a.source.localeCompare(b.source);
-      const aField = (a.data as SmartEdgeData | undefined)?.fieldName ?? '';
-      const bField = (b.data as SmartEdgeData | undefined)?.fieldName ?? '';
-      return aField.localeCompare(bField);
-    });
-
-    const targetSideIndex = edgesToSameTargetSide.findIndex((edge) => edge.id === id);
-    const targetSideTotal = edgesToSameTargetSide.length;
-    if (targetSideTotal > 1 && targetSideIndex >= 0) {
-      if (targetPos === Position.Left || targetPos === Position.Right) {
-        const spacing = targetHeight / (targetSideTotal + 1);
-        targetY = targetNode.position.y + spacing * (targetSideIndex + 1);
-      } else {
-        const spacing = targetWidth / (targetSideTotal + 1);
-        targetX = targetNode.position.x + spacing * (targetSideIndex + 1);
-      }
-    }
+    sourceX = sourceAnchor.x;
+    sourceY = sourceAnchor.y;
+    targetX = targetAnchor.x;
+    targetY = targetAnchor.y;
 
     const [edgePath, labelX, labelY] = getBezierPath({
       sourceX,

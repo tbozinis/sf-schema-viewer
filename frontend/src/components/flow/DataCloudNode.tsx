@@ -280,7 +280,9 @@ function DataCloudNode({ data, selected, id }: DataCloudNodeProps) {
           {data.label}
         </span>
         {data.isStandard && (
-          <Key className={cn('h-3.5 w-3.5 shrink-0 text-amber-500')} title="Standard Entity" />
+          <span title="Standard Entity">
+            <Key className={cn('h-3.5 w-3.5 shrink-0 text-amber-500')} />
+          </span>
         )}
       </div>
 
@@ -301,7 +303,9 @@ function DataCloudNode({ data, selected, id }: DataCloudNodeProps) {
               >
                 <div className="flex items-center gap-1 min-w-0">
                   {field.is_primary_key && (
-                    <Key className="h-3 w-3 text-amber-500 shrink-0" title="Primary Key" />
+                    <span title="Primary Key">
+                      <Key className="h-3 w-3 text-amber-500 shrink-0" />
+                    </span>
                   )}
                   {field.is_foreign_key && (
                     <span className="text-purple-500 shrink-0" title={`FK → ${field.reference_to}`}>

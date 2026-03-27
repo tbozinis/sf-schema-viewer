@@ -4,7 +4,7 @@
  */
 
 import { useState, useMemo, useCallback, useRef, useEffect } from 'react';
-import { ChevronLeft, ChevronRight, X, RefreshCw, Database, Cloud, Key } from 'lucide-react';
+import { ChevronLeft, ChevronRight, X, RefreshCw, Cloud, Key } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Checkbox } from '@/components/ui/checkbox';
@@ -29,7 +29,7 @@ import {
 } from '@/components/ui/tooltip';
 import { cn } from '@/lib/utils';
 import { useAppStore } from '../../store';
-import type { DataCloudEntityBasicInfo, DataCloudEntityType } from '../../types/datacloud';
+import type { DataCloudEntityBasicInfo } from '../../types/datacloud';
 
 // Maximum number of entities that can be safely rendered without performance issues
 const MAX_SAFE_ENTITIES = 50;

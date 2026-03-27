@@ -3,7 +3,7 @@
  * Workspace-aware: switches between Core (SF objects) and Data Cloud (DLO/DMO) views.
  */
 
-import { useCallback, useEffect, useState, useMemo } from 'react';
+import { useCallback, useEffect, useState } from 'react';
 import {
   ReactFlow,
   Background,
@@ -23,7 +23,6 @@ import {
   ChevronUp,
   Settings,
   Download,
-  Database,
   Cloud,
 } from 'lucide-react';
 import { Badge } from '@/components/ui/badge';
