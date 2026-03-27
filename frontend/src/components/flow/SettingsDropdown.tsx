@@ -88,7 +88,11 @@ const SETTINGS_GROUPS: Array<{
 export function SettingsDropdown() {
   const dropdownRef = useRef<HTMLDivElement>(null);
   const badgeSettings = useAppStore((state) => state.badgeSettings);
+  const edgeRoutingMode = useAppStore((state) => state.edgeRoutingMode);
+  const orthogonalProtectedRouting = useAppStore((state) => state.orthogonalProtectedRouting);
   const toggleBadgeSetting = useAppStore((state) => state.toggleBadgeSetting);
+  const setEdgeRoutingMode = useAppStore((state) => state.setEdgeRoutingMode);
+  const setOrthogonalProtectedRouting = useAppStore((state) => state.setOrthogonalProtectedRouting);
   const toggleSettingsDropdown = useAppStore((state) => state.toggleSettingsDropdown);
   const activeWorkspace = useAppStore((state) => state.activeWorkspace);
   const isDataCloud = activeWorkspace === 'datacloud';
@@ -123,9 +127,7 @@ export function SettingsDropdown() {
     >
       {/* Header */}
       <div className="px-3 py-2 border-b border-gray-100 bg-gray-50">
-        <h4 className="m-0 text-[11px] text-sf-text-muted uppercase tracking-wide font-semibold">
-          Badge Display
-        </h4>
+        <h4 className="m-0 text-[11px] text-sf-text-muted uppercase tracking-wide font-semibold">Diagram Settings</h4>
       </div>
 
       {/* Grouped toggle options */}
@@ -147,6 +149,41 @@ export function SettingsDropdown() {
                 </div>
                 {/* Group settings */}
                 <div className="space-y-1">
+                  {group.title === 'Diagram' && !isDataCloud && (
+                    <>
+                      <button
+                        onClick={() => setEdgeRoutingMode(edgeRoutingMode === 'orthogonal' ? 'curved' : 'orthogonal')}
+                        className={cn(
+                          'w-full px-2.5 py-1.5 text-xs rounded-sm border transition-all flex items-center justify-between font-medium',
+                          edgeRoutingMode === 'orthogonal'
+                            ? 'bg-emerald-100 border-emerald-300 text-emerald-700'
+                            : 'bg-gray-50 border-gray-200 text-gray-400 hover:bg-gray-100 hover:text-gray-500'
+                        )}
+                        title="Use straight 90-degree routing with line jumps for edge crossings"
+                      >
+                        <span>Orthogonal Routing</span>
+                        {edgeRoutingMode === 'orthogonal' && <Check className="h-3 w-3 ml-2" />}
+                      </button>
+                      <button
+                        onClick={() => setOrthogonalProtectedRouting(!orthogonalProtectedRouting)}
+                        disabled={edgeRoutingMode !== 'orthogonal'}
+                        className={cn(
+                          'w-full px-2.5 py-1.5 text-xs rounded-sm border transition-all flex items-center justify-between font-medium',
+                          edgeRoutingMode !== 'orthogonal'
+                            ? 'bg-gray-50 border-gray-200 text-gray-300 cursor-not-allowed'
+                            : orthogonalProtectedRouting
+                              ? 'bg-teal-100 border-teal-300 text-teal-700'
+                              : 'bg-gray-50 border-gray-200 text-gray-400 hover:bg-gray-100 hover:text-gray-500'
+                        )}
+                        title="Spread parallel orthogonal runs into separate lanes to reduce line overlap"
+                      >
+                        <span>Avoid Line Overlap</span>
+                        {edgeRoutingMode === 'orthogonal' && orthogonalProtectedRouting && (
+                          <Check className="h-3 w-3 ml-2" />
+                        )}
+                      </button>
+                    </>
+                  )}
                   {visibleSettings.map((setting) => {
                     const isActive = badgeSettings[setting.key];
                     return (

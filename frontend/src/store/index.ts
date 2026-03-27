@@ -22,6 +22,7 @@ import { api } from '../api/client';
 import { transformToFlowElements } from '../utils/transformers';
 import { applyDagreLayout } from '../utils/layout';
 import { CLOUD_PACKS } from '../data/cloudPacks';
+import type { EdgeRoutingMode } from '../components/flow/edgeRouting';
 
 /**
  * Workspace type - determines which view is active
@@ -97,6 +98,9 @@ export interface BadgeDisplaySettings {
   showAllConnections: boolean;    // Show all edges between object pairs (vs single representative)
   showSelfReferences: boolean;    // Show self-referential edges (e.g., Account.ParentId → Account)
 }
+
+const DEFAULT_EDGE_ROUTING_MODE: EdgeRoutingMode = 'curved';
+const DEFAULT_ORTHOGONAL_PROTECTED_ROUTING = true;
 
 /** Default badge settings - show internal sharing, record counts, animation, and edge labels by default */
 const DEFAULT_BADGE_SETTINGS: BadgeDisplaySettings = {
@@ -189,6 +193,8 @@ interface AppState {
 
   // Badge display settings (controls which metadata badges appear on nodes)
   badgeSettings: BadgeDisplaySettings;
+  edgeRoutingMode: EdgeRoutingMode;
+  orthogonalProtectedRouting: boolean;
   showSettingsDropdown: boolean;
 
   // Export state
@@ -272,6 +278,8 @@ interface AppState {
   // Badge display settings actions
   toggleSettingsDropdown: () => void;
   toggleBadgeSetting: (key: keyof BadgeDisplaySettings) => void;
+  setEdgeRoutingMode: (mode: EdgeRoutingMode) => void;
+  setOrthogonalProtectedRouting: (enabled: boolean) => void;
   // Export actions
   toggleExportDropdown: () => void;
   setExportSetting: <K extends keyof ExportSettings>(key: K, value: ExportSettings[K]) => void;
@@ -330,6 +338,8 @@ export const useAppStore = create<AppState>((set, get) => ({
   enrichmentLoading: new Set(),  // Objects currently being enriched
   fieldMetadata: new Map(),  // Field-level metadata (indexed, classification, etc.)
   badgeSettings: { ...DEFAULT_BADGE_SETTINGS },
+  edgeRoutingMode: DEFAULT_EDGE_ROUTING_MODE,
+  orthogonalProtectedRouting: DEFAULT_ORTHOGONAL_PROTECTED_ROUTING,
   showSettingsDropdown: false,
   exportSettings: { ...DEFAULT_EXPORT_SETTINGS },
   showExportDropdown: false,
@@ -712,7 +722,16 @@ export const useAppStore = create<AppState>((set, get) => ({
   },
 
   applyLayout: () => {
-    const { selectedObjectNames, describedObjects, selectedFieldsByObject, selectedChildRelsByParent, relationshipTypeByKey, badgeSettings } = get();
+    const {
+      selectedObjectNames,
+      describedObjects,
+      selectedFieldsByObject,
+      selectedChildRelsByParent,
+      relationshipTypeByKey,
+      badgeSettings,
+      edgeRoutingMode,
+      orthogonalProtectedRouting,
+    } = get();
 
     // Get describes for selected objects
     const describes = selectedObjectNames
@@ -728,7 +747,15 @@ export const useAppStore = create<AppState>((set, get) => ({
     const { nodes, edges } = transformToFlowElements(describes, selectedObjectNames, selectedFieldsByObject, selectedChildRelsByParent, relationshipTypeByKey, badgeSettings.showAllConnections, badgeSettings.showSelfReferences);
 
     // Apply Dagre layout
-    const layouted = applyDagreLayout(nodes, edges);
+    const layouted = applyDagreLayout(
+      nodes,
+      edges,
+      edgeRoutingMode === 'orthogonal'
+        ? orthogonalProtectedRouting
+          ? { nodeSpacing: 200, rankSpacing: 340 }
+          : { nodeSpacing: 160, rankSpacing: 280 }
+        : undefined
+    );
 
     set({ nodes: layouted.nodes, edges: layouted.edges });
   },
@@ -1212,6 +1239,24 @@ export const useAppStore = create<AppState>((set, get) => ({
     }));
   },
 
+  setEdgeRoutingMode: (mode: EdgeRoutingMode) => {
+    set({ edgeRoutingMode: mode });
+
+    const { activeWorkspace, selectedObjectNames } = get();
+    if (activeWorkspace === 'core' && selectedObjectNames.length > 0) {
+      get().applyLayout();
+    }
+  },
+
+  setOrthogonalProtectedRouting: (enabled: boolean) => {
+    set({ orthogonalProtectedRouting: enabled });
+
+    const { activeWorkspace, selectedObjectNames, edgeRoutingMode } = get();
+    if (activeWorkspace === 'core' && edgeRoutingMode === 'orthogonal' && selectedObjectNames.length > 0) {
+      get().applyLayout();
+    }
+  },
+
   // Export actions
   toggleExportDropdown: () => {
     set((state) => ({ showExportDropdown: !state.showExportDropdown }));
@@ -1527,7 +1572,7 @@ export const useAppStore = create<AppState>((set, get) => ({
   // Recalculate DC edges only, preserving node positions
   // Used when self-references or connection settings change
   refreshDcEdges: () => {
-    const { dcSelectedEntityNames, dcDescribedEntities, dcNodes, badgeSettings } = get();
+    const { dcSelectedEntityNames, dcDescribedEntities, badgeSettings } = get();
 
     if (dcSelectedEntityNames.length === 0) return;
 

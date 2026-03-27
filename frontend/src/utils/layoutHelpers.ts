@@ -5,7 +5,6 @@
  */
 
 import type { Edge } from '@xyflow/react';
-import type { RelationshipEdgeData } from '../types/schema';
 
 export interface EdgeCounts {
   left: number;
@@ -23,7 +22,7 @@ export interface EdgeCounts {
  * - Target nodes have edges entering from the LEFT side
  */
 export function calculateEdgeCountsPerNode(
-  edges: Edge<RelationshipEdgeData>[]
+  edges: Edge[]
 ): Map<string, EdgeCounts> {
   const counts = new Map<string, EdgeCounts>();
 

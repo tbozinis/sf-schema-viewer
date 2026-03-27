@@ -1,18 +1,24 @@
 /**
- * Smart edge that dynamically connects to the best side of nodes
- * based on their relative positions.
+ * Smart edge that supports both curved and orthogonal routing modes.
  */
 
 import { memo, useMemo } from 'react';
 import {
-  getBezierPath,
   EdgeLabelRenderer,
+  getBezierPath,
+  Position,
   useReactFlow,
   type Edge,
+  type Node,
   type EdgeProps,
-  Position,
 } from '@xyflow/react';
 import { useAppStore } from '../../store';
+import {
+  buildOrthogonalPathWithLineJumps,
+  buildOrthogonalRouteMap,
+  getTargetSide,
+  type EdgeRoutingMode,
+} from './edgeRouting';
 
 // Edge data type
 export interface SmartEdgeData {
@@ -23,15 +29,24 @@ export interface SmartEdgeData {
   sourceCardinality?: string;
   targetCardinality?: string;
   // For multiple edges between same nodes - enables visual offset
-  edgeIndex?: number;      // Position in group (0, 1, 2...)
-  totalEdges?: number;     // Total edges in this source-target group
+  edgeIndex?: number;
+  totalEdges?: number;
   [key: string]: unknown;
 }
 
 export type SmartEdgeType = Edge<SmartEdgeData, 'simpleFloating'>;
-
-// Use EdgeProps which includes all the position data React Flow passes
 type SmartEdgeProps = EdgeProps<SmartEdgeType>;
+
+interface EdgeGeometry {
+  edgePath: string;
+  labelX: number;
+  labelY: number;
+  sourceCardX: number;
+  sourceCardY: number;
+  targetCardX: number;
+  targetCardY: number;
+  isSelfLoop: boolean;
+}
 
 function SmartEdge({
   id,
@@ -40,101 +55,62 @@ function SmartEdge({
   data,
   selected,
 }: SmartEdgeProps) {
-  const { getNode, getEdges } = useReactFlow();
+  const { getNode, getNodes, getEdges } = useReactFlow();
   const animateEdges = useAppStore((state) => state.badgeSettings.animateEdges);
   const showEdgeLabels = useAppStore((state) => state.badgeSettings.showEdgeLabels);
+  const activeWorkspace = useAppStore((state) => state.activeWorkspace);
+  const edgeRoutingMode = useAppStore((state) => state.edgeRoutingMode);
+  const orthogonalProtectedRouting = useAppStore((state) => state.orthogonalProtectedRouting);
 
-  // Get actual node data for position calculations
   const sourceNode = getNode(source);
   const targetNode = getNode(target);
+  const effectiveRoutingMode: EdgeRoutingMode =
+    activeWorkspace === 'core' ? edgeRoutingMode : 'curved';
 
-  // Helper to determine which side of target an edge connects to
-  const getTargetSide = (srcNode: typeof sourceNode, tgtNode: typeof targetNode): Position => {
-    if (!srcNode || !tgtNode || !srcNode.measured?.width || !tgtNode.measured?.width) {
-      return Position.Left;
-    }
-    const srcCenterX = srcNode.position.x + srcNode.measured.width / 2;
-    const srcCenterY = srcNode.position.y + srcNode.measured.height! / 2;
-    const tgtCenterX = tgtNode.position.x + tgtNode.measured.width / 2;
-    const tgtCenterY = tgtNode.position.y + tgtNode.measured.height! / 2;
-
-    const dx = tgtCenterX - srcCenterX;
-    const dy = tgtCenterY - srcCenterY;
-    const horizontalDominant = Math.abs(dx) > Math.abs(dy) * 0.5;
-
-    if (horizontalDominant) {
-      return dx > 0 ? Position.Left : Position.Right;
-    } else {
-      return dy > 0 ? Position.Top : Position.Bottom;
-    }
-  };
-
-  // Memoize expensive position calculations
-  // Only recalculates when node positions or dimensions change
-  const edgeGeometry = useMemo(() => {
+  const curvedGeometry = useMemo((): EdgeGeometry | null => {
     if (!sourceNode || !targetNode) {
       return null;
     }
 
-    // Don't render until React Flow has measured the nodes
-    // This prevents edges from using wrong fallback dimensions and showing gaps
     if (!sourceNode.measured?.width || !targetNode.measured?.width) {
       return null;
     }
 
-    // Get node positions and dimensions (now guaranteed to exist)
     const sourceWidth = sourceNode.measured.width;
     const sourceHeight = sourceNode.measured.height!;
     const targetWidth = targetNode.measured.width;
     const targetHeight = targetNode.measured.height!;
 
-    // ===========================================
-    // SELF-REFERENTIAL EDGE (e.g., Account → Account)
-    // Render as a curved loop on the right side of the node
-    // ===========================================
     if (source === target) {
-      // Calculate loop dimensions based on node size
-      const loopWidth = 60;  // How far the loop extends from the node
-      const loopHeight = 50; // Vertical span of the loop
+      const loopWidth = 60;
+      const loopHeight = 50;
 
-      // Get all self-referential edges for this node to distribute them
       const allEdges = getEdges();
-      const selfEdges = allEdges.filter(e => e.source === source && e.target === target);
+      const selfEdges = allEdges.filter((edge) => edge.source === source && edge.target === target);
       selfEdges.sort((a, b) => {
-        const aField = (a.data as SmartEdgeData)?.fieldName ?? '';
-        const bField = (b.data as SmartEdgeData)?.fieldName ?? '';
+        const aField = (a.data as SmartEdgeData | undefined)?.fieldName ?? '';
+        const bField = (b.data as SmartEdgeData | undefined)?.fieldName ?? '';
         return aField.localeCompare(bField);
       });
-      const selfEdgeIndex = selfEdges.findIndex(e => e.id === id);
-      const totalSelfEdges = selfEdges.length;
 
-      // Distribute multiple self-edges vertically
+      const selfEdgeIndex = selfEdges.findIndex((edge) => edge.id === id);
+      const totalSelfEdges = selfEdges.length;
       const verticalOffset = (selfEdgeIndex - (totalSelfEdges - 1) / 2) * (loopHeight + 20);
 
-      // Start and end on the right side of the node
       const startX = sourceNode.position.x + sourceWidth;
       const startY = sourceNode.position.y + sourceHeight / 2 - 15 + verticalOffset;
       const endX = sourceNode.position.x + sourceWidth;
       const endY = sourceNode.position.y + sourceHeight / 2 + 15 + verticalOffset;
-
-      // Control points for smooth loop curve
       const cp1X = startX + loopWidth;
       const cp1Y = startY - loopHeight / 2;
       const cp2X = endX + loopWidth;
       const cp2Y = endY + loopHeight / 2;
 
-      // Create curved loop path using cubic bezier
-      const loopPath = `M ${startX} ${startY} C ${cp1X} ${cp1Y}, ${cp2X} ${cp2Y}, ${endX} ${endY}`;
-
-      // Label positioned at the rightmost point of the loop
-      const labelX = startX + loopWidth + 10;
-      const labelY = (startY + endY) / 2;
-
       return {
-        edgePath: loopPath,
-        labelX,
-        labelY,
-        sourceCardX: 0,  // Not used for self-references
+        edgePath: `M ${startX} ${startY} C ${cp1X} ${cp1Y}, ${cp2X} ${cp2Y}, ${endX} ${endY}`,
+        labelX: startX + loopWidth + 10,
+        labelY: (startY + endY) / 2,
+        sourceCardX: 0,
         sourceCardY: 0,
         targetCardX: 0,
         targetCardY: 0,
@@ -142,148 +118,118 @@ function SmartEdge({
       };
     }
 
-    // Calculate center points
     const sourceCenterX = sourceNode.position.x + sourceWidth / 2;
     const sourceCenterY = sourceNode.position.y + sourceHeight / 2;
     const targetCenterX = targetNode.position.x + targetWidth / 2;
     const targetCenterY = targetNode.position.y + targetHeight / 2;
-
-    // Calculate direction from source to target
     const dx = targetCenterX - sourceCenterX;
     const dy = targetCenterY - sourceCenterY;
-
-    // Determine optimal connection sides based on relative positions
     const horizontalDominant = Math.abs(dx) > Math.abs(dy) * 0.5;
 
-    let sourceX: number, sourceY: number, targetX: number, targetY: number;
-    let sourcePos: Position, targetPos: Position;
+    let sourceX: number;
+    let sourceY: number;
+    let targetX: number;
+    let targetY: number;
+    let sourcePos: Position;
+    let targetPos: Position;
 
     if (horizontalDominant) {
       if (dx > 0) {
-        // Target is to the RIGHT of source
         sourcePos = Position.Right;
         sourceX = sourceNode.position.x + sourceWidth;
         sourceY = sourceCenterY;
-
         targetPos = Position.Left;
         targetX = targetNode.position.x;
         targetY = targetCenterY;
       } else {
-        // Target is to the LEFT of source
         sourcePos = Position.Left;
         sourceX = sourceNode.position.x;
         sourceY = sourceCenterY;
-
         targetPos = Position.Right;
         targetX = targetNode.position.x + targetWidth;
         targetY = targetCenterY;
       }
+    } else if (dy > 0) {
+      sourcePos = Position.Bottom;
+      sourceX = sourceCenterX;
+      sourceY = sourceNode.position.y + sourceHeight;
+      targetPos = Position.Top;
+      targetX = targetCenterX;
+      targetY = targetNode.position.y;
     } else {
-      if (dy > 0) {
-        // Target is BELOW source
-        sourcePos = Position.Bottom;
-        sourceX = sourceCenterX;
-        sourceY = sourceNode.position.y + sourceHeight;
-
-        targetPos = Position.Top;
-        targetX = targetCenterX;
-        targetY = targetNode.position.y;
-      } else {
-        // Target is ABOVE source
-        sourcePos = Position.Top;
-        sourceX = sourceCenterX;
-        sourceY = sourceNode.position.y;
-
-        targetPos = Position.Bottom;
-        targetX = targetCenterX;
-        targetY = targetNode.position.y + targetHeight;
-      }
+      sourcePos = Position.Top;
+      sourceX = sourceCenterX;
+      sourceY = sourceNode.position.y;
+      targetPos = Position.Bottom;
+      targetX = targetCenterX;
+      targetY = targetNode.position.y + targetHeight;
     }
 
-    // Get all edges for distribution calculations
     const allEdges = getEdges();
-
-    // ========================================
-    // DISTRIBUTE SOURCE CONNECTION POINTS
-    // Group all edges by source node + side, then spread them along the edge
-    // ========================================
-    const edgesFromSameSourceSide = allEdges.filter(e => {
-      if (e.source !== source) return false;
-      const edgeSourceNode = getNode(e.source);
-      const edgeTargetNode = getNode(e.target);
+    const edgesFromSameSourceSide = allEdges.filter((edge) => {
+      if (edge.source !== source) return false;
+      const edgeSourceNode = getNode(edge.source);
+      const edgeTargetNode = getNode(edge.target);
       if (!edgeSourceNode || !edgeTargetNode) return false;
-      // Calculate source side for this edge (opposite of target side logic)
+
       const side = getTargetSide(edgeSourceNode, edgeTargetNode);
-      // Source side is opposite: if target is on left, source connects from right
-      const edgeSourceSide = side === Position.Left ? Position.Right :
-                             side === Position.Right ? Position.Left :
-                             side === Position.Top ? Position.Bottom : Position.Top;
+      const edgeSourceSide = side === Position.Left
+        ? Position.Right
+        : side === Position.Right
+          ? Position.Left
+          : side === Position.Top
+            ? Position.Bottom
+            : Position.Top;
+
       return edgeSourceSide === sourcePos;
     });
 
-    // Sort edges consistently (by target name, then field name) for stable indexing
     edgesFromSameSourceSide.sort((a, b) => {
       if (a.target !== b.target) return a.target.localeCompare(b.target);
-      const aField = (a.data as SmartEdgeData)?.fieldName ?? '';
-      const bField = (b.data as SmartEdgeData)?.fieldName ?? '';
+      const aField = (a.data as SmartEdgeData | undefined)?.fieldName ?? '';
+      const bField = (b.data as SmartEdgeData | undefined)?.fieldName ?? '';
       return aField.localeCompare(bField);
     });
 
-    // Find this edge's index among edges from the same source side
-    const sourceSideIndex = edgesFromSameSourceSide.findIndex(e => e.id === id);
+    const sourceSideIndex = edgesFromSameSourceSide.findIndex((edge) => edge.id === id);
     const sourceSideTotal = edgesFromSameSourceSide.length;
-
-    // Distribute source connection points along the node edge
     if (sourceSideTotal > 1 && sourceSideIndex >= 0) {
       if (sourcePos === Position.Left || sourcePos === Position.Right) {
-        // Vertical distribution along left/right sides
         const spacing = sourceHeight / (sourceSideTotal + 1);
         sourceY = sourceNode.position.y + spacing * (sourceSideIndex + 1);
       } else {
-        // Horizontal distribution along top/bottom sides
         const spacing = sourceWidth / (sourceSideTotal + 1);
         sourceX = sourceNode.position.x + spacing * (sourceSideIndex + 1);
       }
     }
 
-    // ========================================
-    // DISTRIBUTE TARGET CONNECTION POINTS
-    // Group all edges by target node + side, then spread them along the edge
-    // ========================================
-    const edgesToSameTargetSide = allEdges.filter(e => {
-      if (e.target !== target) return false;
-      const edgeSourceNode = getNode(e.source);
-      const edgeTargetNode = getNode(e.target);
-      const side = getTargetSide(edgeSourceNode, edgeTargetNode);
-      return side === targetPos;
+    const edgesToSameTargetSide = allEdges.filter((edge) => {
+      if (edge.target !== target) return false;
+      const edgeSourceNode = getNode(edge.source);
+      const edgeTargetNode = getNode(edge.target);
+      return getTargetSide(edgeSourceNode, edgeTargetNode) === targetPos;
     });
 
-    // Sort edges consistently (by source name, then field name) for stable indexing
     edgesToSameTargetSide.sort((a, b) => {
       if (a.source !== b.source) return a.source.localeCompare(b.source);
-      const aField = (a.data as SmartEdgeData)?.fieldName ?? '';
-      const bField = (b.data as SmartEdgeData)?.fieldName ?? '';
+      const aField = (a.data as SmartEdgeData | undefined)?.fieldName ?? '';
+      const bField = (b.data as SmartEdgeData | undefined)?.fieldName ?? '';
       return aField.localeCompare(bField);
     });
 
-    // Find this edge's index among edges to the same target side
-    const targetSideIndex = edgesToSameTargetSide.findIndex(e => e.id === id);
+    const targetSideIndex = edgesToSameTargetSide.findIndex((edge) => edge.id === id);
     const targetSideTotal = edgesToSameTargetSide.length;
-
-    // Distribute target connection points along the node edge
     if (targetSideTotal > 1 && targetSideIndex >= 0) {
       if (targetPos === Position.Left || targetPos === Position.Right) {
-        // Vertical distribution along left/right sides
         const spacing = targetHeight / (targetSideTotal + 1);
         targetY = targetNode.position.y + spacing * (targetSideIndex + 1);
       } else {
-        // Horizontal distribution along top/bottom sides
         const spacing = targetWidth / (targetSideTotal + 1);
         targetX = targetNode.position.x + spacing * (targetSideIndex + 1);
       }
     }
 
-    const [edgePath, rawLabelX, rawLabelY] = getBezierPath({
+    const [edgePath, labelX, labelY] = getBezierPath({
       sourceX,
       sourceY,
       sourcePosition: sourcePos,
@@ -292,24 +238,16 @@ function SmartEdge({
       targetPosition: targetPos,
     });
 
-    // Labels are positioned along the bezier path midpoint
-    // Since edges are now distributed at both ends, labels naturally spread out
-    const labelX = rawLabelX;
-    const labelY = rawLabelY;
-
-    // Calculate cardinality label positions (offset from connection points)
     const cardinalityOffset = 25;
     let sourceCardX = sourceX;
     let sourceCardY = sourceY;
     let targetCardX = targetX;
     let targetCardY = targetY;
 
-    // Offset based on which side the connection is on
     if (sourcePos === Position.Right) sourceCardX += cardinalityOffset;
     if (sourcePos === Position.Left) sourceCardX -= cardinalityOffset;
     if (sourcePos === Position.Top) sourceCardY -= cardinalityOffset;
     if (sourcePos === Position.Bottom) sourceCardY += cardinalityOffset;
-
     if (targetPos === Position.Right) targetCardX += cardinalityOffset;
     if (targetPos === Position.Left) targetCardX -= cardinalityOffset;
     if (targetPos === Position.Top) targetCardY -= cardinalityOffset;
@@ -326,6 +264,9 @@ function SmartEdge({
       isSelfLoop: false,
     };
   }, [
+    id,
+    source,
+    target,
     sourceNode?.position.x,
     sourceNode?.position.y,
     sourceNode?.measured?.width,
@@ -334,31 +275,78 @@ function SmartEdge({
     targetNode?.position.y,
     targetNode?.measured?.width,
     targetNode?.measured?.height,
-    // For source-side and target-side distribution
-    id,
-    source,
-    target,
     getEdges,
     getNode,
-    getTargetSide,
-    // Force recalculation when _refresh changes (after node measurements complete)
-    // This works around React Flow mutating node.measured in place without triggering re-renders
-    (data as Record<string, unknown>)?._refresh,
+    (data as Record<string, unknown> | undefined)?._refresh,
   ]);
 
-  // Early return if nodes not found
+  const orthogonalGeometry = useMemo((): EdgeGeometry | null => {
+    if (!sourceNode || !targetNode || !sourceNode.measured?.width || !targetNode.measured?.width) {
+      return null;
+    }
+
+    const routes = buildOrthogonalRouteMap(
+      getEdges() as Edge<Record<string, unknown>>[],
+      getNodes() as Node<Record<string, unknown>>[],
+      (nodeId) => getNode(nodeId) as Node<Record<string, unknown>> | undefined
+      ,
+      { protectedRouting: orthogonalProtectedRouting }
+    );
+    const route = routes.get(id);
+    if (!route) {
+      return null;
+    }
+
+    return {
+      edgePath: buildOrthogonalPathWithLineJumps(id, routes),
+      labelX: route.labelX,
+      labelY: route.labelY,
+      sourceCardX: route.sourceCardX,
+      sourceCardY: route.sourceCardY,
+      targetCardX: route.targetCardX,
+      targetCardY: route.targetCardY,
+      isSelfLoop: route.isSelfLoop,
+    };
+  }, [
+    id,
+    sourceNode?.position.x,
+    sourceNode?.position.y,
+    sourceNode?.measured?.width,
+    sourceNode?.measured?.height,
+    targetNode?.position.x,
+    targetNode?.position.y,
+    targetNode?.measured?.width,
+    targetNode?.measured?.height,
+    getEdges,
+    getNodes,
+    getNode,
+    orthogonalProtectedRouting,
+    (data as Record<string, unknown> | undefined)?._refresh,
+  ]);
+
+  const edgeGeometry =
+    effectiveRoutingMode === 'orthogonal' ? orthogonalGeometry ?? curvedGeometry : curvedGeometry;
+
   if (!edgeGeometry) {
     return null;
   }
 
-  const { edgePath, labelX, labelY, sourceCardX, sourceCardY, targetCardX, targetCardY, isSelfLoop } = edgeGeometry;
+  const {
+    edgePath,
+    labelX,
+    labelY,
+    sourceCardX,
+    sourceCardY,
+    targetCardX,
+    targetCardY,
+    isSelfLoop,
+  } = edgeGeometry;
   const isMasterDetail = data?.relationshipType === 'master-detail';
   const sourceCard = data?.sourceCardinality || 'N';
   const targetCard = data?.targetCardinality || '1';
 
   return (
     <>
-      {/* Main edge path */}
       <path
         id={id}
         className={`relationship-edge ${isMasterDetail ? 'master-detail' : 'lookup'} ${selected ? 'selected' : ''} ${animateEdges ? 'animated' : ''}`}
@@ -366,12 +354,9 @@ function SmartEdge({
         markerEnd={`url(#${isMasterDetail ? 'arrow-filled' : 'arrow-hollow'})`}
       />
 
-      {/* Edge labels */}
       <EdgeLabelRenderer>
-        {/* Cardinality labels - hidden for self-referential loops */}
         {!isSelfLoop && (
           <>
-            {/* Source cardinality */}
             <div
               className="cardinality-label source"
               style={{
@@ -380,8 +365,6 @@ function SmartEdge({
             >
               {sourceCard}
             </div>
-
-            {/* Target cardinality */}
             <div
               className="cardinality-label target"
               style={{
@@ -393,7 +376,6 @@ function SmartEdge({
           </>
         )}
 
-        {/* Field name label - conditionally shown based on settings */}
         {showEdgeLabels && (
           <div
             className={`edge-label ${isMasterDetail ? 'master-detail' : 'lookup'} ${selected ? 'selected' : ''}`}
@@ -411,19 +393,13 @@ function SmartEdge({
 
 export default memo(SmartEdge);
 
-// Type alias for backwards compatibility with existing code
 export type RelationshipEdgeData = SmartEdgeData;
 export type RelationshipEdgeType = SmartEdgeType;
 
-/**
- * SVG marker definitions for edge arrows.
- * These should be included in the React Flow container.
- */
 export function EdgeMarkerDefs() {
   return (
     <svg style={{ position: 'absolute', width: 0, height: 0 }}>
       <defs>
-        {/* Filled arrow for master-detail relationships */}
         <marker
           id="arrow-filled"
           viewBox="0 0 10 10"
@@ -436,7 +412,6 @@ export function EdgeMarkerDefs() {
           <path d="M 0 0 L 10 5 L 0 10 z" fill="#DC2626" />
         </marker>
 
-        {/* Hollow arrow for lookup relationships */}
         <marker
           id="arrow-hollow"
           viewBox="0 0 10 10"

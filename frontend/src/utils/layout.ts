@@ -4,7 +4,6 @@
 
 import dagre from '@dagrejs/dagre';
 import type { Node, Edge } from '@xyflow/react';
-import type { ObjectNodeData, RelationshipEdgeData } from '../types/schema';
 import { calculateEdgeCountsPerNode, calculateDynamicHeight } from './layoutHelpers';
 
 interface LayoutOptions {
@@ -27,10 +26,10 @@ const DEFAULT_OPTIONS: LayoutOptions = {
  * Apply Dagre layout to nodes and edges.
  */
 export function applyDagreLayout(
-  nodes: Node<ObjectNodeData>[],
-  edges: Edge<RelationshipEdgeData>[],
+  nodes: Node[],
+  edges: Edge[],
   options: Partial<LayoutOptions> = {}
-): { nodes: Node<ObjectNodeData>[]; edges: Edge<RelationshipEdgeData>[] } {
+): { nodes: Node[]; edges: Edge[] } {
   const opts = { ...DEFAULT_OPTIONS, ...options };
 
   // Pre-calculate edge counts to determine dynamic node heights
@@ -51,8 +50,9 @@ export function applyDagreLayout(
 
   // Add nodes to the graph with DYNAMIC heights based on edge count
   for (const node of nodes) {
+    const nodeData = node.data as { collapsed?: boolean; fields?: unknown[] };
     // Base height from field count (if not collapsed)
-    const fieldCount = node.data.collapsed ? 0 : Math.min(node.data.fields.length, 10);
+    const fieldCount = nodeData.collapsed ? 0 : Math.min(nodeData.fields?.length ?? 0, 10);
     const fieldBasedHeight = 60 + fieldCount * 28;
 
     // Get edge-based height for this node (accounts for edge distribution)
@@ -95,7 +95,7 @@ export function applyDagreLayout(
  * Get viewport to fit all nodes.
  */
 export function getViewportForNodes(
-  nodes: Node<ObjectNodeData>[],
+  nodes: Node[],
   padding = 50
 ): { x: number; y: number; width: number; height: number } {
   if (nodes.length === 0) {
