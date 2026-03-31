@@ -3,7 +3,7 @@
  * Workspace-aware: switches between Core (SF objects) and Data Cloud (DLO/DMO) views.
  */
 
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import {
   ReactFlow,
   Background,
@@ -54,9 +54,11 @@ export default function SchemaFlow() {
     // Core nodes/edges
     nodes: coreNodes,
     edges: coreEdges,
-    applyLayout: applyCoreLayout,
+    applyCoreLayout,
+    layoutSyncToken,
     refreshEdges,
     isLoadingDescribe: coreIsLoading,
+    isCoreLayouting,
     selectedObjectNames,
     // Data Cloud nodes/edges
     dcNodes,
@@ -64,6 +66,7 @@ export default function SchemaFlow() {
     applyDcLayout,
     refreshDcEdges,
     dcIsLoadingDescribe,
+    isDcLayouting,
     dcSelectedEntityNames,
     // UI state
     showLegend,
@@ -78,8 +81,8 @@ export default function SchemaFlow() {
   // Get workspace-specific values
   const storeNodes = activeWorkspace === 'core' ? coreNodes : dcNodes;
   const storeEdges = activeWorkspace === 'core' ? coreEdges : dcEdges;
-  const applyLayout = activeWorkspace === 'core' ? applyCoreLayout : applyDcLayout;
   const isLoadingDescribe = activeWorkspace === 'core' ? coreIsLoading : dcIsLoadingDescribe;
+  const isLayouting = activeWorkspace === 'core' ? isCoreLayouting : isDcLayouting;
   const selectedCount = activeWorkspace === 'core' ? selectedObjectNames.length : dcSelectedEntityNames.length;
 
   // Settings from badge display (controls various diagram behaviors)
@@ -90,19 +93,23 @@ export default function SchemaFlow() {
   const [nodes, setNodes, onNodesChange] = useNodesState(storeNodes);
   const [edges, setEdges, onEdgesChange] = useEdgesState(storeEdges);
   const { fitView } = useReactFlow();
+  const lastLayoutSyncTokenRef = useRef(layoutSyncToken);
 
   // Sync nodes from store when objects are added/removed OR when node data changes
   // Preserve local positions for existing nodes (user may have dragged them)
   // Works for both Core and Data Cloud workspaces
   useEffect(() => {
+    const shouldUseStorePositions = layoutSyncToken !== lastLayoutSyncTokenRef.current;
+
     // Use callback form to access current nodes without adding to dependencies
     setNodes(currentNodes => {
       const currentPositions = new Map(currentNodes.map(n => [n.id, n.position]));
 
       return storeNodes.map(node => ({
         ...node,
-        // Use current position if exists (preserves drag), otherwise use store position
-        position: currentPositions.get(node.id) ?? node.position,
+        position: shouldUseStorePositions
+          ? node.position
+          : currentPositions.get(node.id) ?? node.position,
         data: {
           // Handle both ObjectNodeData and DataCloudNodeData
           ...(node.data as ObjectNodeData | DataCloudNodeData),
@@ -111,6 +118,10 @@ export default function SchemaFlow() {
       }));
     });
     setEdges(storeEdges);
+
+    if (shouldUseStorePositions) {
+      lastLayoutSyncTokenRef.current = layoutSyncToken;
+    }
 
     // Force edges to re-render after React Flow measures new nodes
     // This is needed because SmartEdge returns null until nodes are measured,
@@ -128,7 +139,7 @@ export default function SchemaFlow() {
     }, 100);
 
     return () => clearTimeout(timer);
-  }, [storeNodes, storeEdges, setNodes, setEdges, compactMode, activeWorkspace]);
+  }, [storeNodes, storeEdges, setNodes, setEdges, compactMode, activeWorkspace, layoutSyncToken]);
 
   // Toggle compact mode without resetting positions
   // Also refresh edges after a delay to allow node measurements to update
@@ -160,6 +171,13 @@ export default function SchemaFlow() {
 
     return () => clearTimeout(timer);
   }, [compactMode, setNodes, setEdges]);
+
+  useEffect(() => {
+    if (nodes.length > 0 && layoutSyncToken > 0) {
+      const timer = setTimeout(() => fitView({ padding: 0.2, duration: 300 }), 120);
+      return () => clearTimeout(timer);
+    }
+  }, [layoutSyncToken, nodes.length, fitView]);
 
   // Refresh edges when connection display settings change
   // showAllConnections: recalculates which edges to show (all vs deduplicated single edge per pair)
@@ -199,20 +217,14 @@ export default function SchemaFlow() {
     [onEdgesChange]
   );
 
-  const handleReLayout = useCallback(() => {
-    applyLayout();
-    // Force update nodes with new dagre positions (bypass position preservation in useEffect)
-    // Get the correct nodes based on active workspace
-    const state = useAppStore.getState();
-    const newNodes = state.activeWorkspace === 'core' ? state.nodes : state.dcNodes;
-    setNodes(newNodes.map(node => ({
-      ...node,
-      data: {
-        ...(node.data as ObjectNodeData | DataCloudNodeData),
-        compactMode,
-      },
-    })));
-  }, [applyLayout, setNodes, compactMode]);
+  const handleReLayout = useCallback(async () => {
+    if (activeWorkspace === 'core') {
+      await applyCoreLayout();
+      return;
+    }
+
+    await applyDcLayout();
+  }, [activeWorkspace, applyCoreLayout, applyDcLayout]);
 
   return (
     <div className="w-full h-full relative bg-sf-background">
@@ -240,10 +252,16 @@ export default function SchemaFlow() {
         <Panel position="top-right" className="flex gap-2">
           <button
             onClick={handleReLayout}
-            className="bg-white border border-gray-300 rounded-sm px-3.5 py-2 text-sm font-medium cursor-pointer flex items-center gap-1.5 shadow-sm text-sf-text hover:bg-blue-50 hover:border-sf-blue hover:text-sf-blue transition-all active:scale-[0.98]"
+            disabled={isLayouting}
+            className={cn(
+              'bg-white border border-gray-300 rounded-sm px-3.5 py-2 text-sm font-medium flex items-center gap-1.5 shadow-sm transition-all active:scale-[0.98]',
+              isLayouting
+                ? 'cursor-wait text-sf-text-muted opacity-75'
+                : 'cursor-pointer text-sf-text hover:bg-blue-50 hover:border-sf-blue hover:text-sf-blue'
+            )}
             title="Re-apply auto-layout"
           >
-            <RefreshCcw className="h-4 w-4" />
+            <RefreshCcw className={cn('h-4 w-4', isLayouting && 'animate-spin')} />
             Auto Layout
           </button>
           <button
@@ -297,7 +315,7 @@ export default function SchemaFlow() {
         </Panel>
 
         {/* Empty state - true center, compact size, workspace-aware */}
-        {nodes.length === 0 && !isLoadingDescribe && (
+        {nodes.length === 0 && !isLoadingDescribe && !isLayouting && (
           <div className="absolute inset-0 flex items-center justify-center pointer-events-none">
             <div className="bg-white/95 border border-gray-200 rounded-lg px-6 py-4 text-center shadow-sm">
               {activeWorkspace === 'core' ? (
@@ -318,11 +336,19 @@ export default function SchemaFlow() {
         )}
 
         {/* Loading state */}
-        {isLoadingDescribe && (
+        {(isLoadingDescribe || isLayouting) && (
           <Panel position="top-center" className="pointer-events-none">
             <div className="bg-white border border-gray-300 rounded-sm px-6 py-3 flex items-center gap-3 shadow-sm text-sm text-sf-text">
               <Loader2 className="h-4 w-4 animate-spin" />
-              <span>{activeWorkspace === 'core' ? 'Loading schema...' : 'Loading entities...'}</span>
+              <span>
+                {isLoadingDescribe
+                  ? activeWorkspace === 'core'
+                    ? 'Loading schema...'
+                    : 'Loading entities...'
+                  : activeWorkspace === 'core'
+                    ? 'Calculating layout...'
+                    : 'Calculating entity layout...'}
+              </span>
             </div>
           </Panel>
         )}

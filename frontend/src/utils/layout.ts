@@ -1,94 +1,220 @@
 /**
- * Layout utilities using Dagre for automatic node positioning.
+ * Layout utilities using ELK for automatic node positioning and edge routing.
  */
 
-import dagre from '@dagrejs/dagre';
-import type { Node, Edge } from '@xyflow/react';
-import { calculateEdgeCountsPerNode, calculateDynamicHeight } from './layoutHelpers';
+import ELK, {
+  type ElkEdgeSection,
+  type ElkExtendedEdge,
+  type ElkNode,
+} from 'elkjs/lib/elk.bundled.js';
+import type { Edge, Node } from '@xyflow/react';
+import {
+  calculateDynamicHeight,
+  calculateEdgeCountsPerNode,
+  type EdgeCounts,
+} from './layoutHelpers';
+
+export interface ElkLayoutPoint {
+  x: number;
+  y: number;
+}
+
+export interface ElkLayoutSection {
+  id: string;
+  startPoint: ElkLayoutPoint;
+  bendPoints?: ElkLayoutPoint[];
+  endPoint: ElkLayoutPoint;
+  incomingSections?: string[];
+  outgoingSections?: string[];
+}
+
+export interface ElkLayoutPath {
+  sections: ElkLayoutSection[];
+}
 
 interface LayoutOptions {
-  direction: 'TB' | 'LR' | 'BT' | 'RL';
+  direction: 'RIGHT' | 'DOWN';
   nodeWidth: number;
   nodeHeight: number;
   nodeSpacing: number;
-  rankSpacing: number;
+  layerSpacing: number;
+  edgeNodeBetweenLayers: number;
 }
 
 const DEFAULT_OPTIONS: LayoutOptions = {
-  direction: 'LR', // Left to right (horizontal)
+  direction: 'RIGHT',
   nodeWidth: 280,
   nodeHeight: 300,
-  nodeSpacing: 100,  // Space between nodes in same rank (was 50)
-  rankSpacing: 200,  // Space between ranks/levels (was 100)
+  nodeSpacing: 100,
+  layerSpacing: 200,
+  edgeNodeBetweenLayers: 50,
 };
 
+const elk = new ELK();
+
+function readDimension(value: unknown, fallback: number) {
+  if (typeof value === 'number' && Number.isFinite(value)) {
+    return value;
+  }
+
+  if (typeof value === 'string') {
+    const parsed = Number.parseFloat(value);
+    if (Number.isFinite(parsed)) {
+      return parsed;
+    }
+  }
+
+  return fallback;
+}
+
+export function getNodeRenderDimensions(
+  node: Node,
+  fallbackWidth: number = DEFAULT_OPTIONS.nodeWidth,
+  fallbackHeight: number = DEFAULT_OPTIONS.nodeHeight
+) {
+  return {
+    width: readDimension(node.width ?? node.style?.width, fallbackWidth),
+    height: readDimension(node.height ?? node.style?.height, fallbackHeight),
+  };
+}
+
+function getLayoutDimensions(
+  node: Node,
+  options: LayoutOptions,
+  edgeCounts: Map<string, EdgeCounts>
+) {
+  const nodeData = node.data as { collapsed?: boolean; fields?: unknown[] };
+  const fieldCount = nodeData.collapsed ? 0 : Math.min(nodeData.fields?.length ?? 0, 10);
+  const fieldBasedHeight = 60 + fieldCount * 28;
+  const nodeEdgeCounts = edgeCounts.get(node.id) || { left: 0, right: 0, top: 0, bottom: 0 };
+  const edgeBasedHeight = calculateDynamicHeight(nodeEdgeCounts);
+  const dynamicHeight = Math.max(fieldBasedHeight, edgeBasedHeight);
+  const explicitDimensions = getNodeRenderDimensions(node, options.nodeWidth, options.nodeHeight);
+
+  return {
+    width: explicitDimensions.width,
+    height: readDimension(
+      node.height ?? node.style?.height,
+      Math.min(dynamicHeight, options.nodeHeight)
+    ),
+  };
+}
+
+function mapElkSection(section: ElkEdgeSection): ElkLayoutSection {
+  return {
+    id: section.id,
+    startPoint: {
+      x: section.startPoint.x,
+      y: section.startPoint.y,
+    },
+    bendPoints: section.bendPoints?.map((point) => ({
+      x: point.x,
+      y: point.y,
+    })),
+    endPoint: {
+      x: section.endPoint.x,
+      y: section.endPoint.y,
+    },
+    incomingSections: section.incomingSections,
+    outgoingSections: section.outgoingSections,
+  };
+}
+
 /**
- * Apply Dagre layout to nodes and edges.
+ * Apply ELK layout to nodes and edges.
  */
-export function applyDagreLayout(
+export async function applyElkLayout(
   nodes: Node[],
   edges: Edge[],
   options: Partial<LayoutOptions> = {}
-): { nodes: Node[]; edges: Edge[] } {
+): Promise<{ nodes: Node[]; edges: Edge[] }> {
   const opts = { ...DEFAULT_OPTIONS, ...options };
-
-  // Pre-calculate edge counts to determine dynamic node heights
-  // This ensures Dagre spaces nodes correctly based on their actual sizes
   const edgeCounts = calculateEdgeCountsPerNode(edges);
+  const dimensionsById = new Map(
+    nodes.map((node) => [node.id, getLayoutDimensions(node, opts, edgeCounts)])
+  );
 
-  // Create a new directed graph
-  const g = new dagre.graphlib.Graph();
-  g.setDefaultEdgeLabel(() => ({}));
-  g.setGraph({
-    rankdir: opts.direction,
-    nodesep: opts.nodeSpacing,
-    ranksep: opts.rankSpacing,
-    ranker: 'network-simplex',  // Optimizes for fewer edge crossings
-    marginx: 20,
-    marginy: 20,
-  });
+  const elkGraph: ElkNode = {
+    id: 'layout-root',
+    layoutOptions: {
+      'elk.algorithm': 'layered',
+      'elk.direction': opts.direction,
+      'elk.edgeRouting': 'ORTHOGONAL',
+      'elk.layered.mergeEdges': 'false',
+      'elk.layered.spacing.edgeNodeBetweenLayers': String(opts.edgeNodeBetweenLayers),
+      'elk.layered.spacing.nodeNodeBetweenLayers': String(opts.layerSpacing),
+      'elk.spacing.nodeNode': String(opts.nodeSpacing),
+      'elk.padding': '[top=20,left=20,bottom=20,right=20]',
+    },
+    children: nodes.map((node) => {
+      const dimensions = dimensionsById.get(node.id);
 
-  // Add nodes to the graph with DYNAMIC heights based on edge count
-  for (const node of nodes) {
-    const nodeData = node.data as { collapsed?: boolean; fields?: unknown[] };
-    // Base height from field count (if not collapsed)
-    const fieldCount = nodeData.collapsed ? 0 : Math.min(nodeData.fields?.length ?? 0, 10);
-    const fieldBasedHeight = 60 + fieldCount * 28;
+      return {
+        id: node.id,
+        width: dimensions?.width ?? opts.nodeWidth,
+        height: dimensions?.height ?? opts.nodeHeight,
+      };
+    }),
+    edges: edges.map<ElkExtendedEdge>((edge) => ({
+      id: edge.id,
+      sources: [edge.source],
+      targets: [edge.target],
+    })),
+  };
 
-    // Get edge-based height for this node (accounts for edge distribution)
-    const nodeEdgeCounts = edgeCounts.get(node.id) || { left: 0, right: 0, top: 0, bottom: 0 };
-    const edgeBasedHeight = calculateDynamicHeight(nodeEdgeCounts);
+  const layoutedGraph = await elk.layout(elkGraph);
+  const childrenById = new Map(
+    (layoutedGraph.children ?? []).map((child) => [child.id, child])
+  );
+  const edgesById = new Map(
+    (layoutedGraph.edges ?? []).map((edge) => [edge.id, edge])
+  );
 
-    // Use the larger of field-based or edge-based height
-    const dynamicHeight = Math.max(fieldBasedHeight, edgeBasedHeight);
-
-    g.setNode(node.id, {
-      width: opts.nodeWidth,
-      height: Math.min(dynamicHeight, opts.nodeHeight),
-    });
-  }
-
-  // Add edges to the graph
-  for (const edge of edges) {
-    g.setEdge(edge.source, edge.target);
-  }
-
-  // Run the layout algorithm
-  dagre.layout(g);
-
-  // Apply the calculated positions to nodes
   const layoutedNodes = nodes.map((node) => {
-    const nodeWithPosition = g.node(node.id);
+    const layoutedNode = childrenById.get(node.id);
+    const fallbackDimensions = dimensionsById.get(node.id) ?? {
+      width: opts.nodeWidth,
+      height: opts.nodeHeight,
+    };
+    const width = readDimension(layoutedNode?.width, fallbackDimensions.width);
+    const height = readDimension(layoutedNode?.height, fallbackDimensions.height);
+
     return {
       ...node,
       position: {
-        x: nodeWithPosition.x - opts.nodeWidth / 2,
-        y: nodeWithPosition.y - nodeWithPosition.height / 2,
+        x: readDimension(layoutedNode?.x, node.position.x),
+        y: readDimension(layoutedNode?.y, node.position.y),
+      },
+      width,
+      height,
+      initialWidth: width,
+      initialHeight: height,
+      measured: {
+        width,
+        height,
+      },
+      style: {
+        ...(node.style ?? {}),
+        width,
+        height,
       },
     };
   });
 
-  return { nodes: layoutedNodes, edges };
+  const layoutedEdges = edges.map((edge) => {
+    const layoutedEdge = edgesById.get(edge.id);
+    const sections = layoutedEdge?.sections?.map(mapElkSection) ?? [];
+
+    return {
+      ...edge,
+      data: {
+        ...(edge.data ?? {}),
+        elkPath: sections.length > 0 ? { sections } : undefined,
+      },
+    };
+  });
+
+  return { nodes: layoutedNodes, edges: layoutedEdges };
 }
 
 /**
@@ -108,10 +234,11 @@ export function getViewportForNodes(
   let maxY = -Infinity;
 
   for (const node of nodes) {
+    const { width, height } = getNodeRenderDimensions(node);
     minX = Math.min(minX, node.position.x);
     minY = Math.min(minY, node.position.y);
-    maxX = Math.max(maxX, node.position.x + 280); // Node width
-    maxY = Math.max(maxY, node.position.y + 300); // Estimated node height
+    maxX = Math.max(maxX, node.position.x + width);
+    maxY = Math.max(maxY, node.position.y + height);
   }
 
   return {

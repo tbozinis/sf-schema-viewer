@@ -18,11 +18,11 @@ import type {
   DataCloudEntityType,
 } from '../types/datacloud';
 import type { ObjectNodeData } from '../components/flow/ObjectNode';
+import type { EdgeRoutingMode } from '../components/flow/SmartEdge';
 import { api } from '../api/client';
 import { transformToFlowElements } from '../utils/transformers';
-import { applyDagreLayout } from '../utils/layout';
+import { applyElkLayout } from '../utils/layout';
 import { CLOUD_PACKS } from '../data/cloudPacks';
-import type { EdgeRoutingMode } from '../components/flow/edgeRouting';
 
 /**
  * Workspace type - determines which view is active
@@ -100,7 +100,6 @@ export interface BadgeDisplaySettings {
 }
 
 const DEFAULT_EDGE_ROUTING_MODE: EdgeRoutingMode = 'curved';
-const DEFAULT_ORTHOGONAL_PROTECTED_ROUTING = true;
 
 /** Default badge settings - show internal sharing, record counts, animation, and edge labels by default */
 const DEFAULT_BADGE_SETTINGS: BadgeDisplaySettings = {
@@ -130,6 +129,75 @@ const DEFAULT_EXPORT_SETTINGS: ExportSettings = {
   includeLegend: true,
 };
 
+let latestCoreLayoutRequestId = 0;
+let latestDcLayoutRequestId = 0;
+
+function normalizeRelationshipType(
+  value: string | undefined
+): 'lookup' | 'master-detail' {
+  return value?.toLowerCase() === 'master-detail' ? 'master-detail' : 'lookup';
+}
+
+function buildDataCloudFlowElements(
+  selectedEntityNames: string[],
+  describedEntities: Map<string, DataCloudEntityDescribe>,
+  showSelfReferences: boolean
+) {
+  const nodes: Node[] = [];
+  const edges: Edge[] = [];
+
+  for (const name of selectedEntityNames) {
+    const entity = describedEntities.get(name);
+    if (!entity) continue;
+
+    nodes.push({
+      id: name,
+      type: 'dataCloudNode',
+      position: { x: 0, y: 0 },
+      data: {
+        label: entity.display_name || entity.name,
+        apiName: entity.name,
+        entityType: entity.entity_type,
+        category: entity.category,
+        isStandard: entity.is_standard,
+        fields: entity.fields,
+        primaryKeys: entity.primary_keys,
+        collapsed: false,
+      },
+    });
+  }
+
+  for (const name of selectedEntityNames) {
+    const entity = describedEntities.get(name);
+    if (!entity) continue;
+
+    for (const rel of entity.relationships) {
+      if (!selectedEntityNames.includes(rel.to_entity)) {
+        continue;
+      }
+
+      if (name === rel.to_entity && !showSelfReferences) {
+        continue;
+      }
+
+      edges.push({
+        id: `${name}-${rel.from_field}-${rel.to_entity}`,
+        source: name,
+        target: rel.to_entity,
+        type: 'simpleFloating',
+        data: {
+          fieldName: rel.from_field,
+          relationshipType: normalizeRelationshipType(rel.relationship_type),
+          sourceObject: name,
+          targetObject: rel.to_entity,
+        },
+      });
+    }
+  }
+
+  return { nodes, edges };
+}
+
 interface AppState {
   // Auth state
   authStatus: AuthStatus | null;
@@ -152,11 +220,13 @@ interface AppState {
   describedObjects: Map<string, ObjectDescribe>;
   isLoadingObjects: boolean;
   isLoadingDescribe: boolean;
+  isCoreLayouting: boolean;
   objectsLoadTime: number | null;  // Time in seconds for last loadObjects call
 
   // Flow state
   nodes: Node[];
   edges: Edge[];
+  layoutSyncToken: number;
 
   // UI state
   sidebarOpen: boolean;
@@ -194,7 +264,6 @@ interface AppState {
   // Badge display settings (controls which metadata badges appear on nodes)
   badgeSettings: BadgeDisplaySettings;
   edgeRoutingMode: EdgeRoutingMode;
-  orthogonalProtectedRouting: boolean;
   showSettingsDropdown: boolean;
 
   // Export state
@@ -219,6 +288,7 @@ interface AppState {
   dcDescribedEntities: Map<string, DataCloudEntityDescribe>;
   dcIsLoadingEntities: boolean;
   dcIsLoadingDescribe: boolean;
+  isDcLayouting: boolean;
 
   // DC flow (separate from Core)
   dcNodes: Node[];
@@ -240,7 +310,7 @@ interface AppState {
   selectObjects: (names: string[]) => Promise<void>;
   addObject: (name: string) => Promise<void>;
   removeObject: (name: string) => void;
-  applyLayout: () => void;
+  applyCoreLayout: () => Promise<void>;
   toggleSidebar: () => void;
   setSidebarWidth: (width: number) => void;
   setDetailPanelWidth: (width: number) => void;
@@ -260,13 +330,13 @@ interface AppState {
   selectAllFields: (objectName: string) => void;
   clearFieldSelection: (objectName: string) => void;
   selectOnlyLookups: (objectName: string) => void;
-  refreshNodeFields: (objectName: string) => void;  // Update node fields without re-layout
+  refreshNodeFields: (objectName: string) => void;  // Update node fields and re-layout if needed
   toggleNodeCollapse: (nodeId: string) => void;
   // Child relationship selection actions
   addChildRelationship: (parentObject: string, relationshipKey: string, cascadeDelete: boolean) => void;
   removeChildRelationship: (parentObject: string, relationshipKey: string) => void;
   clearChildRelationships: (parentObject: string) => void;
-  refreshEdges: () => void;  // Recalculate edges only (preserves node positions)
+  refreshEdges: () => void;  // Recalculate edges and rerun layout when Core geometry depends on them
   setNodes: (nodes: Node[]) => void;
   setEdges: (edges: Edge[]) => void;
   setError: (error: string | null) => void;
@@ -279,7 +349,6 @@ interface AppState {
   toggleSettingsDropdown: () => void;
   toggleBadgeSetting: (key: keyof BadgeDisplaySettings) => void;
   setEdgeRoutingMode: (mode: EdgeRoutingMode) => void;
-  setOrthogonalProtectedRouting: (enabled: boolean) => void;
   // Export actions
   toggleExportDropdown: () => void;
   setExportSetting: <K extends keyof ExportSettings>(key: K, value: ExportSettings[K]) => void;
@@ -297,8 +366,8 @@ interface AppState {
   setDcFocusedEntity: (name: string | null) => void;
   setDcSearchTerm: (term: string) => void;
   toggleDcEntityTypeFilter: (type: DataCloudEntityType) => void;
-  applyDcLayout: () => void;
-  refreshDcEdges: () => void;  // Recalculate DC edges only (preserves node positions)
+  applyDcLayout: () => Promise<void>;
+  refreshDcEdges: () => void;  // Recalculate DC edges and rerun layout
   clearDataCloudSelections: () => void;
 }
 
@@ -318,9 +387,11 @@ export const useAppStore = create<AppState>((set, get) => ({
   describedObjects: new Map(),
   isLoadingObjects: false,
   isLoadingDescribe: false,
+  isCoreLayouting: false,
   objectsLoadTime: null,
   nodes: [],
   edges: [],
+  layoutSyncToken: 0,
   sidebarOpen: true,
   sidebarWidth: 480,
   detailPanelWidth: 480,
@@ -339,7 +410,6 @@ export const useAppStore = create<AppState>((set, get) => ({
   fieldMetadata: new Map(),  // Field-level metadata (indexed, classification, etc.)
   badgeSettings: { ...DEFAULT_BADGE_SETTINGS },
   edgeRoutingMode: DEFAULT_EDGE_ROUTING_MODE,
-  orthogonalProtectedRouting: DEFAULT_ORTHOGONAL_PROTECTED_ROUTING,
   showSettingsDropdown: false,
   exportSettings: { ...DEFAULT_EXPORT_SETTINGS },
   showExportDropdown: false,
@@ -357,6 +427,7 @@ export const useAppStore = create<AppState>((set, get) => ({
   dcDescribedEntities: new Map(),
   dcIsLoadingEntities: false,
   dcIsLoadingDescribe: false,
+  isDcLayouting: false,
   dcNodes: [],
   dcEdges: [],
   dcFocusedEntityName: null,
@@ -589,11 +660,11 @@ export const useAppStore = create<AppState>((set, get) => ({
     set({ selectedObjectNames: names });
 
     // Update flow elements
-    get().applyLayout();
+    await get().applyCoreLayout();
   },
 
   addObject: async (name: string) => {
-    const { selectedObjectNames, describedObjects, nodes, apiVersion } = get();
+    const { selectedObjectNames, describedObjects, apiVersion } = get();
 
     if (selectedObjectNames.includes(name)) {
       return; // Already selected
@@ -617,73 +688,11 @@ export const useAppStore = create<AppState>((set, get) => ({
 
     const newSelectedObjects = [...selectedObjectNames, name];
     set({ selectedObjectNames: newSelectedObjects });
-
-    // Get the describe for the new object
-    const newDescribedObjects = get().describedObjects;
-    const { selectedFieldsByObject, selectedChildRelsByParent } = get();
-    const describes = newSelectedObjects
-      .map((n) => newDescribedObjects.get(n))
-      .filter((d): d is ObjectDescribe => d !== undefined);
-
-    // Transform to get new nodes and edges (with field selection, child relationship filtering, and type overrides)
-    const { relationshipTypeByKey, badgeSettings } = get();
-    const { nodes: newNodes, edges: newEdges } = transformToFlowElements(describes, newSelectedObjects, selectedFieldsByObject, selectedChildRelsByParent, relationshipTypeByKey, badgeSettings.showAllConnections, badgeSettings.showSelfReferences);
-
-    // Preserve existing node positions, only position new nodes
-    const existingPositions = new Map(nodes.map(n => [n.id, n.position]));
-
-    // Smart positioning: Find which existing objects the new node connects to
-    const connectedNodeIds = new Set<string>();
-    for (const edge of newEdges) {
-      // New node is the source, target is an existing node
-      if (edge.source === name && existingPositions.has(edge.target)) {
-        connectedNodeIds.add(edge.target);
-      }
-      // New node is the target, source is an existing node
-      if (edge.target === name && existingPositions.has(edge.source)) {
-        connectedNodeIds.add(edge.source);
-      }
-    }
-
-    // Calculate position based on connected nodes (relationship-aware)
-    let newX: number;
-    let newY: number;
-
-    if (connectedNodeIds.size > 0 && nodes.length > 0) {
-      // Position near the center of connected nodes + offset to the right
-      const connectedNodes = nodes.filter(n => connectedNodeIds.has(n.id));
-      const avgX = connectedNodes.reduce((sum, n) => sum + n.position.x, 0) / connectedNodes.length;
-      const avgY = connectedNodes.reduce((sum, n) => sum + n.position.y, 0) / connectedNodes.length;
-
-      // Offset to the right of connected cluster (avoids overlap)
-      newX = avgX + 350;
-      newY = avgY;
-    } else if (nodes.length > 0) {
-      // No connections - fallback to placing to the right of all existing nodes
-      let maxX = 0;
-      let sumY = 0;
-      nodes.forEach(n => {
-        maxX = Math.max(maxX, n.position.x + 300); // 300 = approximate node width + gap
-        sumY += n.position.y;
-      });
-      newX = maxX;
-      newY = sumY / nodes.length;
-    } else {
-      // First node - center position
-      newX = 100;
-      newY = 100;
-    }
-
-    const mergedNodes = newNodes.map(node => ({
-      ...node,
-      position: existingPositions.get(node.id) ?? { x: newX, y: newY },
-    }));
-
-    set({ nodes: mergedNodes, edges: newEdges });
+    await get().applyCoreLayout();
   },
 
   removeObject: (name: string) => {
-    const { selectedObjectNames, describedObjects, selectedFieldsByObject, selectedChildRelsByParent, nodes } = get();
+    const { selectedObjectNames, selectedFieldsByObject, selectedChildRelsByParent } = get();
 
     const newSelectedObjects = selectedObjectNames.filter((n) => n !== name);
 
@@ -695,33 +704,19 @@ export const useAppStore = create<AppState>((set, get) => ({
     const newChildRels = new Map(selectedChildRelsByParent);
     newChildRels.delete(name);
 
-    set({ selectedObjectNames: newSelectedObjects, selectedFieldsByObject: newFieldSelections, selectedChildRelsByParent: newChildRels });
+    set({
+      selectedObjectNames: newSelectedObjects,
+      selectedFieldsByObject: newFieldSelections,
+      selectedChildRelsByParent: newChildRels,
+    });
 
-    // Get describes for remaining objects
-    const describes = newSelectedObjects
-      .map((n) => describedObjects.get(n))
-      .filter((d): d is ObjectDescribe => d !== undefined);
-
-    if (describes.length === 0) {
-      set({ nodes: [], edges: [] });
-      return;
-    }
-
-    // Transform to get updated nodes and edges (with field selection, child relationship filtering, and type overrides)
-    const { relationshipTypeByKey, badgeSettings } = get();
-    const { nodes: newNodes, edges: newEdges } = transformToFlowElements(describes, newSelectedObjects, newFieldSelections, newChildRels, relationshipTypeByKey, badgeSettings.showAllConnections, badgeSettings.showSelfReferences);
-
-    // Preserve existing node positions
-    const existingPositions = new Map(nodes.map(n => [n.id, n.position]));
-    const mergedNodes = newNodes.map(node => ({
-      ...node,
-      position: existingPositions.get(node.id) ?? node.position,
-    }));
-
-    set({ nodes: mergedNodes, edges: newEdges });
+    void get().applyCoreLayout();
   },
 
-  applyLayout: () => {
+  applyCoreLayout: async () => {
+    const requestId = ++latestCoreLayoutRequestId;
+    set({ isCoreLayouting: true, error: null });
+
     const {
       selectedObjectNames,
       describedObjects,
@@ -729,35 +724,50 @@ export const useAppStore = create<AppState>((set, get) => ({
       selectedChildRelsByParent,
       relationshipTypeByKey,
       badgeSettings,
-      edgeRoutingMode,
-      orthogonalProtectedRouting,
     } = get();
 
-    // Get describes for selected objects
     const describes = selectedObjectNames
       .map((name) => describedObjects.get(name))
       .filter((d): d is ObjectDescribe => d !== undefined);
 
     if (describes.length === 0) {
-      set({ nodes: [], edges: [] });
+      if (requestId !== latestCoreLayoutRequestId) return;
+      set((state) => ({
+        nodes: [],
+        edges: [],
+        isCoreLayouting: false,
+        layoutSyncToken: state.layoutSyncToken + 1,
+      }));
       return;
     }
 
-    // Transform to React Flow elements (pass field selection, child relationship filtering, and type overrides)
-    const { nodes, edges } = transformToFlowElements(describes, selectedObjectNames, selectedFieldsByObject, selectedChildRelsByParent, relationshipTypeByKey, badgeSettings.showAllConnections, badgeSettings.showSelfReferences);
-
-    // Apply Dagre layout
-    const layouted = applyDagreLayout(
-      nodes,
-      edges,
-      edgeRoutingMode === 'orthogonal'
-        ? orthogonalProtectedRouting
-          ? { nodeSpacing: 200, rankSpacing: 340 }
-          : { nodeSpacing: 160, rankSpacing: 280 }
-        : undefined
+    const flowElements = transformToFlowElements(
+      describes,
+      selectedObjectNames,
+      selectedFieldsByObject,
+      selectedChildRelsByParent,
+      relationshipTypeByKey,
+      badgeSettings.showAllConnections,
+      badgeSettings.showSelfReferences
     );
 
-    set({ nodes: layouted.nodes, edges: layouted.edges });
+    try {
+      const layouted = await applyElkLayout(flowElements.nodes, flowElements.edges);
+
+      if (requestId !== latestCoreLayoutRequestId) return;
+
+      set((state) => ({
+        nodes: layouted.nodes,
+        edges: layouted.edges,
+        isCoreLayouting: false,
+        layoutSyncToken: state.layoutSyncToken + 1,
+      }));
+    } catch (error) {
+      if (requestId !== latestCoreLayoutRequestId) return;
+
+      const message = error instanceof Error ? error.message : 'Failed to apply schema layout';
+      set({ isCoreLayouting: false, error: message });
+    }
   },
 
   toggleSidebar: () => {
@@ -910,6 +920,10 @@ export const useAppStore = create<AppState>((set, get) => ({
 
       return { selectedFieldsByObject: newFieldsMap };
     });
+
+    if (get().selectedObjectNames.includes(objectName)) {
+      void get().applyCoreLayout();
+    }
   },
 
   selectAllFields: (objectName: string) => {
@@ -933,6 +947,10 @@ export const useAppStore = create<AppState>((set, get) => ({
 
       return { selectedFieldsByObject: newFieldsMap };
     });
+
+    if (get().selectedObjectNames.includes(objectName)) {
+      void get().applyCoreLayout();
+    }
   },
 
   clearFieldSelection: (objectName: string) => {
@@ -952,6 +970,10 @@ export const useAppStore = create<AppState>((set, get) => ({
 
       return { selectedFieldsByObject: newFieldsMap };
     });
+
+    if (get().selectedObjectNames.includes(objectName)) {
+      void get().applyCoreLayout();
+    }
   },
 
   selectOnlyLookups: (objectName: string) => {
@@ -983,9 +1005,13 @@ export const useAppStore = create<AppState>((set, get) => ({
 
       return { selectedFieldsByObject: newFieldsMap };
     });
+
+    if (get().selectedObjectNames.includes(objectName)) {
+      void get().applyCoreLayout();
+    }
   },
 
-  // Update node fields in-place without re-running Dagre layout (kept for external use)
+  // Update node fields in-place, then rerun auto-layout when the object is on the canvas
   refreshNodeFields: (objectName: string) => {
     set((state) => {
       const describe = state.describedObjects.get(objectName);
@@ -1004,6 +1030,10 @@ export const useAppStore = create<AppState>((set, get) => ({
 
       return { nodes: updatedNodes };
     });
+
+    if (get().selectedObjectNames.includes(objectName)) {
+      void get().applyCoreLayout();
+    }
   },
 
   toggleNodeCollapse: (nodeId: string) => {
@@ -1014,6 +1044,10 @@ export const useAppStore = create<AppState>((set, get) => ({
           : node
       ),
     }));
+
+    if (get().selectedObjectNames.includes(nodeId)) {
+      void get().applyCoreLayout();
+    }
   },
 
   // Child relationship selection actions
@@ -1074,23 +1108,9 @@ export const useAppStore = create<AppState>((set, get) => ({
     });
   },
 
-  // Recalculate edges only, preserving node positions
-  // Used when child relationships change but objects stay the same
+  // Recalculate edges and refresh layout when the visible relationship set changes
   refreshEdges: () => {
-    const { selectedObjectNames, describedObjects, selectedFieldsByObject, selectedChildRelsByParent, relationshipTypeByKey, badgeSettings } = get();
-
-    const describes = selectedObjectNames
-      .map((name) => describedObjects.get(name))
-      .filter((d): d is ObjectDescribe => d !== undefined);
-
-    if (describes.length === 0) return;
-
-    // Only recalculate edges, keep existing nodes with positions (pass type overrides for accurate MD/Lookup)
-    const { edges: newEdges } = transformToFlowElements(
-      describes, selectedObjectNames, selectedFieldsByObject, selectedChildRelsByParent, relationshipTypeByKey, badgeSettings.showAllConnections, badgeSettings.showSelfReferences
-    );
-
-    set({ edges: newEdges });
+    void get().applyCoreLayout();
   },
 
   setNodes: (nodes) => set({ nodes }),
@@ -1164,9 +1184,9 @@ export const useAppStore = create<AppState>((set, get) => ({
       describes, newSelectedObjects, selectedFieldsByObject, selectedChildRelsByParent, relationshipTypeByKey, badgeSettings.showAllConnections, badgeSettings.showSelfReferences
     );
 
-    // Set nodes/edges then apply Dagre auto-layout for relationship-aware positioning
+    // Set nodes/edges then apply the current Core auto-layout for relationship-aware positioning
     set({ nodes: newNodes, edges: newEdges });
-    get().applyLayout();
+    await get().applyCoreLayout();
 
     return { added: toAdd.length, total: pack.objects.length };
   },
@@ -1237,24 +1257,19 @@ export const useAppStore = create<AppState>((set, get) => ({
         [key]: !state.badgeSettings[key],
       },
     }));
+
+    const { activeWorkspace, selectedObjectNames, dcSelectedEntityNames } = get();
+    if (key === 'compactMode') {
+      if (activeWorkspace === 'core' && selectedObjectNames.length > 0) {
+        void get().applyCoreLayout();
+      } else if (activeWorkspace === 'datacloud' && dcSelectedEntityNames.length > 0) {
+        void get().applyDcLayout();
+      }
+    }
   },
 
   setEdgeRoutingMode: (mode: EdgeRoutingMode) => {
     set({ edgeRoutingMode: mode });
-
-    const { activeWorkspace, selectedObjectNames } = get();
-    if (activeWorkspace === 'core' && selectedObjectNames.length > 0) {
-      get().applyLayout();
-    }
-  },
-
-  setOrthogonalProtectedRouting: (enabled: boolean) => {
-    set({ orthogonalProtectedRouting: enabled });
-
-    const { activeWorkspace, selectedObjectNames, edgeRoutingMode } = get();
-    if (activeWorkspace === 'core' && edgeRoutingMode === 'orthogonal' && selectedObjectNames.length > 0) {
-      get().applyLayout();
-    }
   },
 
   // Export actions
@@ -1336,11 +1351,11 @@ export const useAppStore = create<AppState>((set, get) => ({
     set({ dcSelectedEntityNames: names });
 
     // Update flow elements
-    get().applyDcLayout();
+    await get().applyDcLayout();
   },
 
   addDataCloudEntity: async (name: string) => {
-    const { dcSelectedEntityNames, dcDescribedEntities, dcNodes } = get();
+    const { dcSelectedEntityNames, dcDescribedEntities } = get();
 
     if (dcSelectedEntityNames.includes(name)) {
       return; // Already selected
@@ -1364,125 +1379,25 @@ export const useAppStore = create<AppState>((set, get) => ({
 
     const newSelected = [...dcSelectedEntityNames, name];
     set({ dcSelectedEntityNames: newSelected });
-
-    // Position new node to the right of existing nodes
-    let newX = 100;
-    let newY = 100;
-    if (dcNodes.length > 0) {
-      let maxX = 0;
-      let sumY = 0;
-      dcNodes.forEach(n => {
-        maxX = Math.max(maxX, n.position.x + 300);
-        sumY += n.position.y;
-      });
-      newX = maxX;
-      newY = sumY / dcNodes.length;
-    }
-
-    // Get the describe and create a simple node
-    const entity = get().dcDescribedEntities.get(name);
-    if (entity) {
-      const newNode: Node = {
-        id: name,
-        type: 'dataCloudNode',
-        position: { x: newX, y: newY },
-        data: {
-          label: entity.display_name || entity.name,
-          apiName: entity.name,
-          entityType: entity.entity_type,
-          category: entity.category,
-          isStandard: entity.is_standard,
-          fields: entity.fields,
-          primaryKeys: entity.primary_keys,
-          collapsed: false,
-        },
-      };
-
-      // Preserve existing node positions
-      const existingPositions = new Map(dcNodes.map(n => [n.id, n.position]));
-      const updatedNodes = [...dcNodes.filter(n => n.id !== name), newNode];
-
-      // Create edges from relationships (respecting showSelfReferences)
-      const { badgeSettings } = get();
-      const newEdges: Edge[] = [];
-      const updatedDescribed = get().dcDescribedEntities;
-      const allSelected = get().dcSelectedEntityNames;
-
-      for (const entityName of allSelected) {
-        const desc = updatedDescribed.get(entityName);
-        if (!desc) continue;
-
-        for (const rel of desc.relationships) {
-          if (allSelected.includes(rel.to_entity)) {
-            // Skip self-referential edges unless the setting is enabled
-            if (entityName === rel.to_entity && !badgeSettings.showSelfReferences) {
-              continue;
-            }
-            newEdges.push({
-              id: `${entityName}-${rel.from_field}-${rel.to_entity}`,
-              source: entityName,
-              target: rel.to_entity,
-              type: 'simpleFloating',
-              data: {
-                fieldName: rel.from_field,
-                relationshipType: rel.relationship_type || 'Lookup',
-              },
-            });
-          }
-        }
-      }
-
-      set({
-        dcNodes: updatedNodes.map(n => ({
-          ...n,
-          position: existingPositions.get(n.id) ?? n.position,
-        })),
-        dcEdges: newEdges,
-      });
-    }
+    await get().applyDcLayout();
   },
 
   removeDataCloudEntity: (name: string) => {
-    const { dcSelectedEntityNames, dcNodes, dcDescribedEntities, badgeSettings } = get();
+    const { dcSelectedEntityNames } = get();
 
     const newSelected = dcSelectedEntityNames.filter((n) => n !== name);
     set({ dcSelectedEntityNames: newSelected });
 
     if (newSelected.length === 0) {
-      set({ dcNodes: [], dcEdges: [] });
+      set((state) => ({
+        dcNodes: [],
+        dcEdges: [],
+        layoutSyncToken: state.layoutSyncToken + 1,
+      }));
       return;
     }
 
-    // Remove node and recalculate edges
-    const updatedNodes = dcNodes.filter(n => n.id !== name);
-
-    // Recalculate edges (respecting showSelfReferences)
-    const newEdges: Edge[] = [];
-    for (const entityName of newSelected) {
-      const desc = dcDescribedEntities.get(entityName);
-      if (!desc) continue;
-
-      for (const rel of desc.relationships) {
-        if (newSelected.includes(rel.to_entity)) {
-          // Skip self-referential edges unless the setting is enabled
-          if (entityName === rel.to_entity && !badgeSettings.showSelfReferences) {
-            continue;
-          }
-          newEdges.push({
-            id: `${entityName}-${rel.from_field}-${rel.to_entity}`,
-            source: entityName,
-            target: rel.to_entity,
-            type: 'simpleFloating',
-            data: {
-              fieldName: rel.from_field,
-              relationshipType: rel.relationship_type || 'Lookup',
-            },
-          });
-        }
-      }
-    }
-
-    set({ dcNodes: updatedNodes, dcEdges: newEdges });
+    void get().applyDcLayout();
   },
 
   setDcFocusedEntity: (name: string | null) => {
@@ -1505,104 +1420,52 @@ export const useAppStore = create<AppState>((set, get) => ({
     });
   },
 
-  applyDcLayout: () => {
-    const { dcSelectedEntityNames, dcDescribedEntities } = get();
+  applyDcLayout: async () => {
+    const requestId = ++latestDcLayoutRequestId;
+    set({ isDcLayouting: true, error: null });
+
+    const { dcSelectedEntityNames, dcDescribedEntities, badgeSettings } = get();
 
     if (dcSelectedEntityNames.length === 0) {
-      set({ dcNodes: [], dcEdges: [] });
+      if (requestId !== latestDcLayoutRequestId) return;
+      set((state) => ({
+        dcNodes: [],
+        dcEdges: [],
+        isDcLayouting: false,
+        layoutSyncToken: state.layoutSyncToken + 1,
+      }));
       return;
     }
 
-    // Create nodes from described entities
-    const nodes: Node[] = [];
-    for (const name of dcSelectedEntityNames) {
-      const entity = dcDescribedEntities.get(name);
-      if (!entity) continue;
+    const flowElements = buildDataCloudFlowElements(
+      dcSelectedEntityNames,
+      dcDescribedEntities,
+      badgeSettings.showSelfReferences
+    );
 
-      nodes.push({
-        id: name,
-        type: 'dataCloudNode',
-        position: { x: 0, y: 0 }, // Will be set by layout
-        data: {
-          label: entity.display_name || entity.name,
-          apiName: entity.name,
-          entityType: entity.entity_type,
-          category: entity.category,
-          isStandard: entity.is_standard,
-          fields: entity.fields,
-          primaryKeys: entity.primary_keys,
-          collapsed: false,
-        },
-      });
+    try {
+      const layouted = await applyElkLayout(flowElements.nodes, flowElements.edges);
+
+      if (requestId !== latestDcLayoutRequestId) return;
+
+      set((state) => ({
+        dcNodes: layouted.nodes,
+        dcEdges: layouted.edges,
+        isDcLayouting: false,
+        layoutSyncToken: state.layoutSyncToken + 1,
+      }));
+    } catch (error) {
+      if (requestId !== latestDcLayoutRequestId) return;
+
+      const message = error instanceof Error ? error.message : 'Failed to apply Data Cloud layout';
+      set({ isDcLayouting: false, error: message });
     }
-
-    // Create edges from relationships (respecting showSelfReferences setting)
-    const { badgeSettings } = get();
-    const edges: Edge[] = [];
-    for (const name of dcSelectedEntityNames) {
-      const entity = dcDescribedEntities.get(name);
-      if (!entity) continue;
-
-      for (const rel of entity.relationships) {
-        if (dcSelectedEntityNames.includes(rel.to_entity)) {
-          // Skip self-referential edges unless the setting is enabled
-          if (name === rel.to_entity && !badgeSettings.showSelfReferences) {
-            continue;
-          }
-          edges.push({
-            id: `${name}-${rel.from_field}-${rel.to_entity}`,
-            source: name,
-            target: rel.to_entity,
-            type: 'simpleFloating',
-            data: {
-              fieldName: rel.from_field,
-              relationshipType: rel.relationship_type || 'Lookup',
-            },
-          });
-        }
-      }
-    }
-
-    // Apply Dagre layout
-    const layouted = applyDagreLayout(nodes, edges);
-
-    set({ dcNodes: layouted.nodes, dcEdges: layouted.edges });
   },
 
   // Recalculate DC edges only, preserving node positions
   // Used when self-references or connection settings change
   refreshDcEdges: () => {
-    const { dcSelectedEntityNames, dcDescribedEntities, badgeSettings } = get();
-
-    if (dcSelectedEntityNames.length === 0) return;
-
-    // Recalculate edges (respecting showSelfReferences setting)
-    const newEdges: Edge[] = [];
-    for (const name of dcSelectedEntityNames) {
-      const entity = dcDescribedEntities.get(name);
-      if (!entity) continue;
-
-      for (const rel of entity.relationships) {
-        if (dcSelectedEntityNames.includes(rel.to_entity)) {
-          // Skip self-referential edges unless the setting is enabled
-          if (name === rel.to_entity && !badgeSettings.showSelfReferences) {
-            continue;
-          }
-          newEdges.push({
-            id: `${name}-${rel.from_field}-${rel.to_entity}`,
-            source: name,
-            target: rel.to_entity,
-            type: 'simpleFloating',
-            data: {
-              fieldName: rel.from_field,
-              relationshipType: rel.relationship_type || 'Lookup',
-            },
-          });
-        }
-      }
-    }
-
-    set({ dcEdges: newEdges });
+    void get().applyDcLayout();
   },
 
   clearDataCloudSelections: () => {

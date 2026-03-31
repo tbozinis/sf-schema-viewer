@@ -18,7 +18,7 @@ export default defineConfig({
           // React core libraries
           'react-vendor': ['react', 'react-dom'],
           // React Flow and layout libraries
-          'flow-vendor': ['@xyflow/react', '@dagrejs/dagre'],
+          'flow-vendor': ['@xyflow/react', 'elkjs'],
           // Radix UI components
           'ui-vendor': [
             '@radix-ui/react-checkbox',
